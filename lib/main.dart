@@ -1,13 +1,36 @@
 import 'dart:html' as html;
 import 'dart:typed_data';
+import 'dart:ui_web' as ui;
 import 'package:flutter/material.dart';
+import 'dart:ui';
 
 void main() {
-  runApp(const MyApp());
+  // Register the camera view before running app
+  var _ = ui.platformViewRegistry.registerViewFactory('camera-view', (
+    int viewId,
+  ) {
+    final video = html.VideoElement()
+      ..autoplay = true
+      ..muted = true
+      ..style.objectFit = 'cover'
+      ..width = 640
+      ..height = 480;
+    html.window.navigator.mediaDevices
+        ?.getUserMedia({'video': true})
+        .then((stream) {
+          video.srcObject = stream;
+        })
+        .catchError((e) {
+          debugPrint('Camera access error: $e');
+        });
+    return video;
+  });
+
+  runApp(const ARApp());
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+class ARApp extends StatelessWidget {
+  const ARApp({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -27,8 +50,12 @@ class TryOnScreen extends StatefulWidget {
 
 class _TryOnScreenState extends State<TryOnScreen> {
   Uint8List? _imageBytes;
+  bool _usingCamera = false;
 
+  /// Pick image from gallery
   void _pickImage() async {
+    setState(() => _usingCamera = false);
+
     final uploadInput = html.FileUploadInputElement()..accept = 'image/*';
     uploadInput.click();
     uploadInput.onChange.listen((event) async {
@@ -44,52 +71,77 @@ class _TryOnScreenState extends State<TryOnScreen> {
     });
   }
 
+  /// Switch to live camera
+  void _startCamera() {
+    setState(() {
+      _usingCamera = true;
+      _imageBytes = null;
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.grey[200],
+      backgroundColor: Colors.grey[100],
       appBar: AppBar(
         title: const Text('AR Earring Try-On 💎'),
         centerTitle: true,
       ),
-      body: Center(
-        child: Column(
-          children: [
-            const SizedBox(height: 16),
-            ElevatedButton.icon(
-              icon: const Icon(Icons.photo),
-              label: const Text("Upload Your Photo"),
-              onPressed: _pickImage,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.purpleAccent,
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-              ),
-            ),
-            const SizedBox(height: 16),
-            if (_imageBytes != null)
-              Expanded(
-                child: EarringOverlay(imageBytes: _imageBytes!),
-              ),
-            if (_imageBytes == null)
-              const Padding(
-                padding: EdgeInsets.all(24.0),
-                child: Text(
-                  "Drag Earring to try virtually 👂💍",
-                  textAlign: TextAlign.center,
-                  style: TextStyle(fontSize: 18, color: Colors.black54),
+      body: Column(
+        children: [
+          const SizedBox(height: 12),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              ElevatedButton.icon(
+                icon: const Icon(Icons.photo_library),
+                label: const Text("Upload Photo"),
+                onPressed: _pickImage,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.purpleAccent,
                 ),
               ),
-          ],
-        ),
+              const SizedBox(width: 12),
+              ElevatedButton.icon(
+                icon: const Icon(Icons.camera_alt),
+                label: const Text("Try Live"),
+                onPressed: _startCamera,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.deepPurple,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          Expanded(
+            child: Center(
+              child: _usingCamera
+                  ? EarringOverlay(liveMode: true)
+                  : (_imageBytes != null
+                        ? EarringOverlay(imageBytes: _imageBytes!)
+                        : const Padding(
+                            padding: EdgeInsets.all(24.0),
+                            child: Text(
+                              "Upload a photo or use live camera to try earrings 👂💍",
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                fontSize: 18,
+                                color: Colors.black54,
+                              ),
+                            ),
+                          )),
+            ),
+          ),
+        ],
       ),
     );
   }
 }
 
 class EarringOverlay extends StatefulWidget {
-  final Uint8List imageBytes;
-  const EarringOverlay({super.key, required this.imageBytes});
+  final Uint8List? imageBytes;
+  final bool liveMode;
+  const EarringOverlay({super.key, this.imageBytes, this.liveMode = false});
 
   @override
   State<EarringOverlay> createState() => _EarringOverlayState();
@@ -101,20 +153,18 @@ class _EarringOverlayState extends State<EarringOverlay> {
   double earringSize = 70;
   int selectedEarring = 0;
 
-  final earrings = [
-    'assets/earrings/ear1.png',
-    'assets/earrings/ear2.png',
-  //  'assets/earrings/diamond3.png',
-  ];
+  final earrings = ['assets/earrings/ear1.png', 'assets/earrings/ear2.png'];
 
   @override
   Widget build(BuildContext context) {
     return Stack(
       children: [
-        // User photo
-        Positioned.fill(
-          child: Image.memory(widget.imageBytes, fit: BoxFit.contain),
-        ),
+        if (widget.liveMode)
+          const Positioned.fill(child: HtmlElementView(viewType: 'camera-view'))
+        else if (widget.imageBytes != null)
+          Positioned.fill(
+            child: Image.memory(widget.imageBytes!, fit: BoxFit.contain),
+          ),
 
         // Left earring
         Positioned(
@@ -146,7 +196,7 @@ class _EarringOverlayState extends State<EarringOverlay> {
           ),
         ),
 
-        // Bottom earring selector
+        // Bottom selector
         Positioned(
           bottom: 10,
           left: 0,
@@ -157,10 +207,7 @@ class _EarringOverlayState extends State<EarringOverlay> {
               color: Colors.white.withOpacity(0.9),
               borderRadius: BorderRadius.circular(16),
               boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.1),
-                  blurRadius: 8,
-                ),
+                BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 8),
               ],
             ),
             child: Row(
@@ -174,10 +221,11 @@ class _EarringOverlayState extends State<EarringOverlay> {
                     padding: const EdgeInsets.all(6),
                     decoration: BoxDecoration(
                       border: Border.all(
-                          color: selectedEarring == i
-                              ? Colors.purpleAccent
-                              : Colors.transparent,
-                          width: 2),
+                        color: selectedEarring == i
+                            ? Colors.purpleAccent
+                            : Colors.transparent,
+                        width: 2,
+                      ),
                       shape: BoxShape.circle,
                       color: Colors.white,
                     ),
