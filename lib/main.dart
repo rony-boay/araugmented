@@ -75,7 +75,7 @@ class _TryOnScreenState extends State<TryOnScreen> {
               const Padding(
                 padding: EdgeInsets.all(24.0),
                 child: Text(
-                  "Upload your photo to try earrings virtually — just like Lenskart! 👂💍",
+                  "Drag Earring to try virtually 👂💍",
                   textAlign: TextAlign.center,
                   style: TextStyle(fontSize: 18, color: Colors.black54),
                 ),
