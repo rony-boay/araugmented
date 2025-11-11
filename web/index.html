@@ -1,38 +1,207 @@
 <!DOCTYPE html>
 <html>
-<head>
-  <!--
-    If you are serving your web app in a path other than the root, change the
-    href value below to reflect the base path you are serving from.
+  <head>
+    <base href="$FLUTTER_BASE_HREF" />
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>AR Earring Try-On</title>
 
-    The path provided below has to start and end with a slash "/" in order for
-    it to work correctly.
+    <!-- face-api.js -->
+    <script defer src="https://unpkg.com/face-api.js@0.22.2/dist/face-api.min.js"></script>
 
-    For more details:
-    * https://developer.mozilla.org/en-US/docs/Web/HTML/Element/base
+    <style>
+      html, body {
+        height: 100%;
+        margin: 0;
+        background: #000;
+      }
+      /* actual video element is appended to body by Flutter view factory; when captured to canvas we read video pixels */
+    </style>
 
-    This is a placeholder for base href that will be replaced by the value of
-    the `--base-href` argument provided to `flutter build`.
-  -->
-  <base href="$FLUTTER_BASE_HREF">
+    <script>
+      (function () {
+        // public global for Flutter to read
+        window.latestFace = null;
+        const MODEL_URL = 'models'; // put face-api model files in web/models/
 
-  <meta charset="UTF-8">
-  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
-  <meta name="description" content="A new Flutter project.">
+        // load models on startup
+        async function loadModels() {
+          try {
+            await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
+            await faceapi.nets.faceLandmark68TinyNet.loadFromUri(MODEL_URL);
+            console.log('✅ face-api models loaded');
+          } catch (e) {
+            console.error('Model load error', e);
+          }
+        }
 
-  <!-- iOS meta tags & icons -->
-  <meta name="mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black">
-  <meta name="apple-mobile-web-app-title" content="araugmented">
-  <link rel="apple-touch-icon" href="icons/Icon-192.png">
+        // ensure video element exists (created by Flutter view factory or fallback)
+        window.getOrCreateVideo = function () {
+          let v = document.getElementById('camera-video');
+          if (!v) {
+            v = document.createElement('video');
+            v.id = 'camera-video';
+            v.autoplay = true;
+            v.muted = true;
+            v.playsInline = true;
+            v.style.objectFit = 'cover';
+            v.style.width = '100%';
+            v.style.height = '100%';
+            v.style.position = 'fixed';
+            v.style.left = '0';
+            v.style.top = '0';
+            v.style.zIndex = '-1';
+            document.body.appendChild(v);
+          }
+          return v;
+        };
 
-  <!-- Favicon -->
-  <link rel="icon" type="image/png" href="favicon.png"/>
+        // start camera stream (called from Flutter)
+        window.startCamera = async function () {
+          const video = window.getOrCreateVideo();
+          try {
+            const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false });
+            video.srcObject = stream;
+            await video.play();
+            // mirror by default (CSS transform). Flutter overlays are mirrored in Flutter mapping.
+            video.style.transform = 'scaleX(-1)';
+            console.log('📸 camera started');
+            startDetectionLoop(video);
+            return true;
+          } catch (err) {
+            console.error('Camera start failed:', err);
+            return false;
+          }
+        };
 
-  <title>araugmented</title>
-  <link rel="manifest" href="manifest.json">
-</head>
-<body>
-  <script src="flutter_bootstrap.js" async></script>
-</body>
+        // detection loop using face-api
+        async function startDetectionLoop(video) {
+          const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.5 });
+
+          async function detectFrame() {
+            try {
+              if (video && video.readyState === 4) {
+                const res = await faceapi.detectSingleFace(video, options).withFaceLandmarks(true);
+                if (res && res.landmarks) {
+                  const lm = res.landmarks;
+                  const size = { width: video.videoWidth, height: video.videoHeight };
+
+                  // choose jaw points near ears (68-landmark indexing):
+                  // left side: landmarks 2-4  (0-indexed in face-api positions -> positions[2..4])
+                  // right side: landmarks 12-14
+                  const avg = (pts) => {
+                    const s = pts.reduce((acc, p) => ({ x: acc.x + p.x, y: acc.y + p.y }), { x: 0, y: 0 });
+                    return { x: (s.x / pts.length) / size.width, y: (s.y / pts.length) / size.height };
+                  };
+
+                  const left = avg([lm.positions[2], lm.positions[3], lm.positions[4]]);
+                  const right = avg([lm.positions[12], lm.positions[13], lm.positions[14]]);
+
+                  window.latestFace = {
+                    leftEar: left,    // normalized 0..1
+                    rightEar: right,  // normalized 0..1
+                    box: {
+                      width: res.detection.box.width / size.width,
+                      height: res.detection.box.height / size.height
+                    },
+                    videoSize: { w: size.width, h: size.height },
+                    timestamp: Date.now()
+                  };
+                } else {
+                  window.latestFace = null;
+                }
+              }
+            } catch (e) {
+              // silently continue
+              // console.warn('detection error', e);
+            }
+            requestAnimationFrame(detectFrame);
+          }
+          requestAnimationFrame(detectFrame);
+        }
+
+        // capture current video frame + earring overlay into canvas and trigger download
+        // earringUrl: string (path), mirror: boolean
+        window.captureFrame = async function (earringUrl, mirror = true) {
+          const video = window.getOrCreateVideo();
+          if (!video || video.readyState < 2) {
+            alert('Camera not ready');
+            return false;
+          }
+
+          // create canvas sized to video resolution
+          const vw = video.videoWidth;
+          const vh = video.videoHeight;
+          const canvas = document.createElement('canvas');
+          canvas.width = vw;
+          canvas.height = vh;
+          const ctx = canvas.getContext('2d');
+
+          // draw mirrored if requested
+          if (mirror) {
+            ctx.translate(vw, 0);
+            ctx.scale(-1, 1);
+          }
+
+          // draw video frame
+          ctx.drawImage(video, 0, 0, vw, vh);
+
+          // draw earring(s) using latestFace if available
+          try {
+            const face = window.latestFace;
+            if (face) {
+              const left = face.leftEar;
+              const right = face.rightEar;
+              const box = face.box;
+              // image for earring
+              const img = await new Promise((resolve, reject) => {
+                const i = new Image();
+                i.crossOrigin = 'anonymous';
+                i.onload = () => resolve(i);
+                i.onerror = reject;
+                i.src = earringUrl.startsWith('/') ? earringUrl : location.origin + '/' + earringUrl;
+              });
+
+              // compute size: base on face box width (normalized)
+              const eSize = Math.max(28, (box.width || 0.18) * vw * 0.5);
+
+              // convert normalized to pixel coords
+              const leftX = (1 - left.x) * vw; // we mirror in canvas by using 1-left.x
+              const leftY = left.y * vh;
+              const rightX = (1 - right.x) * vw;
+              const rightY = right.y * vh;
+
+              // draw centered
+              ctx.drawImage(img, leftX - eSize / 2, leftY - eSize / 2, eSize, eSize);
+              ctx.drawImage(img, rightX - eSize / 2, rightY - eSize / 2, eSize, eSize);
+            }
+          } catch (err) {
+            console.warn('capture draw error', err);
+          }
+
+          // trigger download
+          canvas.toBlob(function (blob) {
+            if (!blob) return;
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'earring_tryon.png';
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
+          }, 'image/png');
+
+          return true;
+        };
+
+        // auto-start model loading
+        loadModels();
+      })();
+    </script>
+  </head>
+
+  <body>
+    <script src="flutter_bootstrap.js" async></script>
+  </body>
 </html>
